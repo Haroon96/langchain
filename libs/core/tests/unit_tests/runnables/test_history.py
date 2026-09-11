@@ -1,10 +1,9 @@
 import re
-from collections.abc import Sequence
-from typing import Any, Callable, Optional, Union
+from collections.abc import Callable, Sequence
+from typing import Any
 
 import pytest
-from packaging import version
-from pydantic import BaseModel
+from pydantic import BaseModel, RootModel
 from typing_extensions import override
 
 from langchain_core.callbacks import (
@@ -20,22 +19,33 @@ from langchain_core.runnables.config import RunnableConfig
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_core.runnables.utils import ConfigurableFieldSpec, Input, Output
 from langchain_core.tracers import Run
-from langchain_core.utils.pydantic import PYDANTIC_VERSION
+from langchain_core.tracers.root_listeners import (
+    AsyncListener,
+    AsyncRootListenersTracer,
+    RootListenersTracer,
+)
 from tests.unit_tests.pydantic_utils import _schema
+
+# This module is the compatibility test suite for `RunnableWithMessageHistory`,
+# so constructing that deprecated class is the behavior under test.
+pytestmark = pytest.mark.filterwarnings(
+    "ignore:RunnableWithMessageHistory is deprecated. Use LangGraph's built-in "
+    "persistence instead.:"
+    "langchain_core._api.deprecation.LangChainDeprecationWarning"
+)
 
 
 def test_interfaces() -> None:
     history = InMemoryChatMessageHistory()
     history.add_message(SystemMessage(content="system"))
-    history.add_user_message("human 1")
-    history.add_ai_message("ai")
-    history.add_message(HumanMessage(content="human 2"))
-    assert str(history) == "System: system\nHuman: human 1\nAI: ai\nHuman: human 2"
+    history.add_message(HumanMessage(content="human 1"))
+    history.add_message(AIMessage(content="ai"))
+    assert str(history) == "System: system\nHuman: human 1\nAI: ai"
 
 
 def _get_get_session_history(
     *,
-    store: Optional[dict[str, Any]] = None,
+    store: dict[str, InMemoryChatMessageHistory] | None = None,
 ) -> Callable[..., InMemoryChatMessageHistory]:
     chat_history_store = store if store is not None else {}
 
@@ -50,11 +60,13 @@ def _get_get_session_history(
 
 
 def test_input_messages() -> None:
-    runnable = RunnableLambda(
-        lambda messages: "you said: "
-        + "\n".join(str(m.content) for m in messages if isinstance(m, HumanMessage))
+    runnable = RunnableLambda[Any, str](
+        lambda messages: (
+            "you said: "
+            + "\n".join(str(m.content) for m in messages if isinstance(m, HumanMessage))
+        )
     )
-    store: dict = {}
+    store: dict[str, InMemoryChatMessageHistory] = {}
     get_session_history = _get_get_session_history(store=store)
     with_history = RunnableWithMessageHistory(runnable, get_session_history)
     config: RunnableConfig = {"configurable": {"session_id": "1"}}
@@ -79,11 +91,13 @@ def test_input_messages() -> None:
 
 
 async def test_input_messages_async() -> None:
-    runnable = RunnableLambda(
-        lambda messages: "you said: "
-        + "\n".join(str(m.content) for m in messages if isinstance(m, HumanMessage))
+    runnable = RunnableLambda[Any, str](
+        lambda messages: (
+            "you said: "
+            + "\n".join(str(m.content) for m in messages if isinstance(m, HumanMessage))
+        )
     )
-    store: dict = {}
+    store: dict[str, InMemoryChatMessageHistory] = {}
     get_session_history = _get_get_session_history(store=store)
     with_history = RunnableWithMessageHistory(runnable, get_session_history)
     config = {"session_id": "1_async"}
@@ -94,7 +108,8 @@ async def test_input_messages_async() -> None:
     output = [
         c
         async for c in with_history.astream([HumanMessage(content="hi again")], config)  # type: ignore[arg-type]
-    ] == ["you said: hello\ngood bye\nhi again"]
+    ]
+    assert output == ["you said: hello\ngood bye\nhi again"]
     assert store == {
         "1_async": InMemoryChatMessageHistory(
             messages=[
@@ -110,10 +125,14 @@ async def test_input_messages_async() -> None:
 
 
 def test_input_dict() -> None:
-    runnable = RunnableLambda(
-        lambda params: "you said: "
-        + "\n".join(
-            str(m.content) for m in params["messages"] if isinstance(m, HumanMessage)
+    runnable = RunnableLambda[Any, str](
+        lambda params: (
+            "you said: "
+            + "\n".join(
+                str(m.content)
+                for m in params["messages"]
+                if isinstance(m, HumanMessage)
+            )
         )
     )
     get_session_history = _get_get_session_history()
@@ -130,10 +149,14 @@ def test_input_dict() -> None:
 
 
 async def test_input_dict_async() -> None:
-    runnable = RunnableLambda(
-        lambda params: "you said: "
-        + "\n".join(
-            str(m.content) for m in params["messages"] if isinstance(m, HumanMessage)
+    runnable = RunnableLambda[Any, str](
+        lambda params: (
+            "you said: "
+            + "\n".join(
+                str(m.content)
+                for m in params["messages"]
+                if isinstance(m, HumanMessage)
+            )
         )
     )
     get_session_history = _get_get_session_history()
@@ -152,11 +175,17 @@ async def test_input_dict_async() -> None:
 
 
 def test_input_dict_with_history_key() -> None:
-    runnable = RunnableLambda(
-        lambda params: "you said: "
-        + "\n".join(
-            [str(m.content) for m in params["history"] if isinstance(m, HumanMessage)]
-            + [params["input"]]
+    runnable = RunnableLambda[Any, str](
+        lambda params: (
+            "you said: "
+            + "\n".join(
+                [
+                    str(m.content)
+                    for m in params["history"]
+                    if isinstance(m, HumanMessage)
+                ]
+                + [params["input"]]
+            )
         )
     )
     get_session_history = _get_get_session_history()
@@ -174,11 +203,17 @@ def test_input_dict_with_history_key() -> None:
 
 
 async def test_input_dict_with_history_key_async() -> None:
-    runnable = RunnableLambda(
-        lambda params: "you said: "
-        + "\n".join(
-            [str(m.content) for m in params["history"] if isinstance(m, HumanMessage)]
-            + [params["input"]]
+    runnable = RunnableLambda[Any, str](
+        lambda params: (
+            "you said: "
+            + "\n".join(
+                [
+                    str(m.content)
+                    for m in params["history"]
+                    if isinstance(m, HumanMessage)
+                ]
+                + [params["input"]]
+            )
         )
     )
     get_session_history = _get_get_session_history()
@@ -196,7 +231,7 @@ async def test_input_dict_with_history_key_async() -> None:
 
 
 def test_output_message() -> None:
-    runnable = RunnableLambda(
+    runnable = RunnableLambda[Any, AIMessage](
         lambda params: AIMessage(
             content="you said: "
             + "\n".join(
@@ -224,7 +259,7 @@ def test_output_message() -> None:
 
 
 async def test_output_message_async() -> None:
-    runnable = RunnableLambda(
+    runnable = RunnableLambda[Any, AIMessage](
         lambda params: AIMessage(
             content="you said: "
             + "\n".join(
@@ -258,8 +293,8 @@ class LengthChatModel(BaseChatModel):
     def _generate(
         self,
         messages: list[BaseMessage],
-        stop: Optional[list[str]] = None,
-        run_manager: Optional[CallbackManagerForLLMRun] = None,
+        stop: list[str] | None = None,
+        run_manager: CallbackManagerForLLMRun | None = None,
         **kwargs: Any,
     ) -> ChatResult:
         """Top Level call."""
@@ -301,7 +336,7 @@ async def test_input_messages_output_message_async() -> None:
 
 
 def test_output_messages() -> None:
-    runnable = RunnableLambda(
+    runnable = RunnableLambda[Any, list[AIMessage]](
         lambda params: [
             AIMessage(
                 content="you said: "
@@ -331,7 +366,7 @@ def test_output_messages() -> None:
 
 
 async def test_output_messages_async() -> None:
-    runnable = RunnableLambda(
+    runnable = RunnableLambda[Any, list[AIMessage]](
         lambda params: [
             AIMessage(
                 content="you said: "
@@ -361,7 +396,7 @@ async def test_output_messages_async() -> None:
 
 
 def test_output_dict() -> None:
-    runnable = RunnableLambda(
+    runnable = RunnableLambda[Any, dict[str, list[AIMessage]]](
         lambda params: {
             "output": [
                 AIMessage(
@@ -394,7 +429,7 @@ def test_output_dict() -> None:
 
 
 async def test_output_dict_async() -> None:
-    runnable = RunnableLambda(
+    runnable = RunnableLambda[Any, dict[str, list[AIMessage]]](
         lambda params: {
             "output": [
                 AIMessage(
@@ -428,9 +463,9 @@ async def test_output_dict_async() -> None:
 
 def test_get_input_schema_input_dict() -> None:
     class RunnableWithChatHistoryInput(BaseModel):
-        input: Union[str, BaseMessage, Sequence[BaseMessage]]
+        input: str | BaseMessage | Sequence[BaseMessage]
 
-    runnable = RunnableLambda(
+    runnable = RunnableLambda[Any, dict[str, list[AIMessage]]](
         lambda params: {
             "output": [
                 AIMessage(
@@ -462,7 +497,7 @@ def test_get_input_schema_input_dict() -> None:
 
 def test_get_output_schema() -> None:
     """Test get output schema."""
-    runnable = RunnableLambda(
+    runnable = RunnableLambda[Any, dict[str, list[AIMessage]]](
         lambda params: {
             "output": [
                 AIMessage(
@@ -489,21 +524,17 @@ def test_get_output_schema() -> None:
     )
     output_type = with_history.get_output_schema()
 
-    expected_schema: dict = {
+    expected_schema: dict[str, Any] = {
         "title": "RunnableWithChatHistoryOutput",
         "type": "object",
     }
-    if version.parse("2.11") <= PYDANTIC_VERSION:
-        expected_schema["additionalProperties"] = True
     assert _schema(output_type) == expected_schema
 
 
 def test_get_input_schema_input_messages() -> None:
-    from pydantic import RootModel
-
     runnable_with_message_history_input = RootModel[Sequence[BaseMessage]]
 
-    runnable = RunnableLambda(
+    runnable = RunnableLambda[Any, dict[str, list[AIMessage]]](
         lambda messages: {
             "output": [
                 AIMessage(
@@ -549,11 +580,11 @@ def test_using_custom_config_specs() -> None:
         user_id: str, conversation_id: str
     ) -> InMemoryChatMessageHistory:
         if (user_id, conversation_id) not in store:
-            store[(user_id, conversation_id)] = InMemoryChatMessageHistory()
-        return store[(user_id, conversation_id)]
+            store[user_id, conversation_id] = InMemoryChatMessageHistory()
+        return store[user_id, conversation_id]
 
     with_message_history = RunnableWithMessageHistory(
-        runnable,  # type: ignore[arg-type]
+        runnable,
         get_session_history=get_session_history,
         input_messages_key="messages",
         history_messages_key="history",
@@ -662,11 +693,11 @@ async def test_using_custom_config_specs_async() -> None:
         user_id: str, conversation_id: str
     ) -> InMemoryChatMessageHistory:
         if (user_id, conversation_id) not in store:
-            store[(user_id, conversation_id)] = InMemoryChatMessageHistory()
-        return store[(user_id, conversation_id)]
+            store[user_id, conversation_id] = InMemoryChatMessageHistory()
+        return store[user_id, conversation_id]
 
     with_message_history = RunnableWithMessageHistory(
-        runnable,  # type: ignore[arg-type]
+        runnable,
         get_session_history=get_session_history,
         input_messages_key="messages",
         history_messages_key="history",
@@ -769,30 +800,26 @@ def test_ignore_session_id() -> None:
 
     runnable = RunnableLambda(_fake_llm)
     history = InMemoryChatMessageHistory()
-    with_message_history = RunnableWithMessageHistory(runnable, lambda: history)  # type: ignore[arg-type]
+    with_message_history = RunnableWithMessageHistory(runnable, lambda: history)
     _ = with_message_history.invoke("hello")
     _ = with_message_history.invoke("hello again")
     assert len(history.messages) == 4
 
 
-class _RunnableLambdaWithRaiseError(RunnableLambda):
-    from langchain_core.tracers.root_listeners import AsyncListener
-
+class _RunnableLambdaWithRaiseError(RunnableLambda[Input, Output]):
     def with_listeners(
         self,
         *,
-        on_start: Optional[
-            Union[Callable[[Run], None], Callable[[Run, RunnableConfig], None]]
-        ] = None,
-        on_end: Optional[
-            Union[Callable[[Run], None], Callable[[Run, RunnableConfig], None]]
-        ] = None,
-        on_error: Optional[
-            Union[Callable[[Run], None], Callable[[Run, RunnableConfig], None]]
-        ] = None,
+        on_start: Callable[[Run], None]
+        | Callable[[Run, RunnableConfig], None]
+        | None = None,
+        on_end: Callable[[Run], None]
+        | Callable[[Run, RunnableConfig], None]
+        | None = None,
+        on_error: Callable[[Run], None]
+        | Callable[[Run, RunnableConfig], None]
+        | None = None,
     ) -> Runnable[Input, Output]:
-        from langchain_core.tracers.root_listeners import RootListenersTracer
-
         def create_tracer(config: RunnableConfig) -> RunnableConfig:
             tracer = RootListenersTracer(
                 config=config,
@@ -807,18 +834,16 @@ class _RunnableLambdaWithRaiseError(RunnableLambda):
 
         return RunnableBinding(
             bound=self,
-            config_factories=[lambda config: create_tracer(config)],
+            config_factories=[create_tracer],
         )
 
     def with_alisteners(
         self,
         *,
-        on_start: Optional[AsyncListener] = None,
-        on_end: Optional[AsyncListener] = None,
-        on_error: Optional[AsyncListener] = None,
+        on_start: AsyncListener | None = None,
+        on_end: AsyncListener | None = None,
+        on_error: AsyncListener | None = None,
     ) -> Runnable[Input, Output]:
-        from langchain_core.tracers.root_listeners import AsyncRootListenersTracer
-
         def create_tracer(config: RunnableConfig) -> RunnableConfig:
             tracer = AsyncRootListenersTracer(
                 config=config,
@@ -833,17 +858,18 @@ class _RunnableLambdaWithRaiseError(RunnableLambda):
 
         return RunnableBinding(
             bound=self,
-            config_factories=[lambda config: create_tracer(config)],
+            config_factories=[create_tracer],
         )
 
 
 def test_get_output_messages_no_value_error() -> None:
-    runnable = _RunnableLambdaWithRaiseError(
-        lambda messages: "you said: "
-        + "\n".join(str(m.content) for m in messages if isinstance(m, HumanMessage))
+    runnable = _RunnableLambdaWithRaiseError[Any, str](
+        lambda messages: (
+            "you said: "
+            + "\n".join(str(m.content) for m in messages if isinstance(m, HumanMessage))
+        )
     )
-    store: dict = {}
-    get_session_history = _get_get_session_history(store=store)
+    get_session_history = _get_get_session_history()
     with_history = RunnableWithMessageHistory(runnable, get_session_history)
     config: RunnableConfig = {
         "configurable": {"session_id": "1", "message_history": get_session_history("1")}
@@ -858,10 +884,9 @@ def test_get_output_messages_no_value_error() -> None:
 
 def test_get_output_messages_with_value_error() -> None:
     illegal_bool_message = False
-    runnable = _RunnableLambdaWithRaiseError(lambda _: illegal_bool_message)
-    store: dict = {}
-    get_session_history = _get_get_session_history(store=store)
-    with_history = RunnableWithMessageHistory(runnable, get_session_history)
+    runnable = _RunnableLambdaWithRaiseError[Any, bool](lambda _: illegal_bool_message)
+    get_session_history = _get_get_session_history()
+    with_history = RunnableWithMessageHistory(runnable, get_session_history)  # type: ignore[arg-type]
     config: RunnableConfig = {
         "configurable": {"session_id": "1", "message_history": get_session_history("1")}
     }
@@ -876,8 +901,8 @@ def test_get_output_messages_with_value_error() -> None:
         with_history.bound.invoke([HumanMessage(content="hello")], config)
 
     illegal_int_message = 123
-    runnable = _RunnableLambdaWithRaiseError(lambda _: illegal_int_message)
-    with_history = RunnableWithMessageHistory(runnable, get_session_history)
+    runnable2 = _RunnableLambdaWithRaiseError[Any, int](lambda _: illegal_int_message)
+    with_history = RunnableWithMessageHistory(runnable2, get_session_history)  # type: ignore[arg-type]
 
     with pytest.raises(
         ValueError,
